@@ -132,3 +132,17 @@ Additionally:
 
 ### Acknowledgements
 We borrow some of the code from AnyLoc. We thank authors of AnyLoc for making their code public. 
+
+### Citation
+If you found our work helpful, please cite it as follows:
+
+```
+@inproceedings{garg2024revisit,
+  title={Revisit anything: Visual place recognition via image segment retrieval},
+  author={Garg, Kartik and Puligilla, Sai Shubodh and Kolathaya, Shishir and Krishna, Madhava and Garg, Sourav},
+  booktitle={European Conference on Computer Vision},
+  pages={326--343},
+  year={2024},
+  organization={Springer}
+}
+```

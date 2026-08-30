@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import tempfile
@@ -12,11 +13,13 @@ from segvlad_vector_db import (
     build_flat_l2_index,
     build_image_offsets,
     load_database,
+    load_ground_truth_csv,
     load_queries,
     prepare_vectors,
     resolve_source_paths,
     save_database,
     save_queries,
+    save_retrieval_csv,
 )
 
 
@@ -105,6 +108,51 @@ class SegvladVectorDbTest(unittest.TestCase):
     def test_prepare_vectors_rejects_zero_vector(self):
         with self.assertRaisesRegex(ValueError, "zero-length"):
             prepare_vectors(np.zeros((1, 2), dtype=np.float32), normalize=True)
+
+    def test_source_target_csv_outputs_results_and_metrics(self):
+        source_paths = ["/source/alice.jpg", "/source/bob.jpg"]
+        target_paths = ["/target/alice.png", "/target/bob.png"]
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            truth_path = os.path.join(output_dir, "ground_truth.csv")
+            with open(truth_path, "w", encoding="utf-8", newline="") as output_file:
+                writer = csv.DictWriter(output_file, fieldnames=["source", "target"])
+                writer.writeheader()
+                writer.writerow({"source": "alice.jpg", "target": "alice.png"})
+                writer.writerow({"source": "bob.jpg", "target": "bob.png"})
+
+            ground_truth = load_ground_truth_csv(
+                truth_path, source_paths, target_paths
+            )
+            self.assertEqual([values.tolist() for values in ground_truth], [[0], [1]])
+
+            results_path = os.path.join(output_dir, "results.csv")
+            metrics_path = os.path.join(output_dir, "metrics.csv")
+            written = save_retrieval_csv(
+                predictions=[[0, 1], [1, 0]],
+                source_paths=source_paths,
+                target_paths=target_paths,
+                results_path=results_path,
+                metrics_path=metrics_path,
+                ground_truth=ground_truth,
+                top_k=2,
+            )
+            self.assertEqual(written["results"], results_path)
+            self.assertEqual(written["metrics"], metrics_path)
+
+            with open(results_path, encoding="utf-8", newline="") as input_file:
+                rows = list(csv.DictReader(input_file))
+            self.assertEqual(len(rows), 4)
+            self.assertEqual(rows[0]["source"], "/source/alice.jpg")
+            self.assertEqual(rows[0]["target"], "/target/alice.png")
+            self.assertEqual(rows[0]["is_correct"], "True")
+
+            with open(metrics_path, encoding="utf-8", newline="") as input_file:
+                metrics = list(csv.DictReader(input_file))
+            self.assertEqual(metrics[0]["accuracy"], "1.0")
+            self.assertEqual(metrics[0]["precision"], "1.0")
+            self.assertEqual(metrics[0]["f1"], "1.0")
+            self.assertEqual(metrics[1]["precision"], "0.5")
 
 
 if __name__ == "__main__":

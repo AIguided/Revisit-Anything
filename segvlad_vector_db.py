@@ -1,9 +1,10 @@
-"""Persistent FAISS storage and benchmarking helpers for SegVLAD vectors."""
+"""Persistent FAISS storage, retrieval reporting, and benchmark helpers."""
 
+import csv
 import json
 import os
 import time
-from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import faiss
 import numpy as np
@@ -65,6 +66,8 @@ def artifact_paths(output_dir: str, name: str) -> Dict[str, str]:
         "metadata": os.path.join(output_dir, name + ".metadata.npz"),
         "queries": os.path.join(output_dir, name + ".queries.npz"),
         "benchmark": os.path.join(output_dir, name + ".benchmark.json"),
+        "results": os.path.join(output_dir, name + ".results.csv"),
+        "metrics": os.path.join(output_dir, name + ".metrics.csv"),
     }
 
 
@@ -138,6 +141,225 @@ def resolve_source_paths(
     if indices.size and (indices.min() < 0 or indices.max() >= len(segment_to_image)):
         raise ValueError("segment result contains an out-of-range FAISS row")
     return reference_paths[segment_to_image[indices]]
+
+
+def _path_index(value: str, paths: Sequence[str], column: str) -> int:
+    """Resolve a CSV path/index against a set of image paths."""
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"ground-truth {column} value must not be empty")
+    if text.isdigit():
+        index = int(text)
+        if 0 <= index < len(paths):
+            return index
+
+    normalized = os.path.normcase(os.path.abspath(os.path.expanduser(text)))
+    exact = {
+        os.path.normcase(os.path.abspath(os.path.expanduser(str(path)))): index
+        for index, path in enumerate(paths)
+    }
+    if normalized in exact:
+        return exact[normalized]
+
+    basename = os.path.normcase(os.path.basename(text))
+    matches = [
+        index
+        for index, path in enumerate(paths)
+        if os.path.normcase(os.path.basename(str(path))) == basename
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"ground-truth {column} basename is ambiguous; use a full path: {text}"
+        )
+    raise ValueError(f"ground-truth {column} image was not found: {text}")
+
+
+def load_ground_truth_csv(
+    input_path: str,
+    source_paths: Sequence[str],
+    target_paths: Sequence[str],
+) -> List[np.ndarray]:
+    """Load correct source/target image pairs for every target query.
+
+    Values in the required ``source`` and ``target`` columns may be image
+    indexes, full paths, or unambiguous basenames. Multiple source rows may be
+    supplied for one target.
+    """
+    positives: List[set] = [set() for _ in target_paths]
+    with open(input_path, "r", encoding="utf-8-sig", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        fieldnames = {str(name).strip().lower(): name for name in reader.fieldnames or []}
+        if "source" not in fieldnames or "target" not in fieldnames:
+            raise ValueError("ground-truth CSV must contain source and target columns")
+        for row_number, row in enumerate(reader, start=2):
+            try:
+                source_index = _path_index(
+                    row[fieldnames["source"]], source_paths, "source"
+                )
+                target_index = _path_index(
+                    row[fieldnames["target"]], target_paths, "target"
+                )
+            except ValueError as error:
+                raise ValueError(f"ground-truth CSV row {row_number}: {error}") from error
+            positives[target_index].add(source_index)
+
+    missing = [index for index, values in enumerate(positives) if not values]
+    if missing:
+        names = ", ".join(os.path.basename(str(target_paths[index])) for index in missing[:5])
+        suffix = "..." if len(missing) > 5 else ""
+        raise ValueError(
+            "ground-truth CSV has no source match for target(s): " + names + suffix
+        )
+    return [np.asarray(sorted(values), dtype=np.int64) for values in positives]
+
+
+def save_retrieval_csv(
+    predictions: Sequence[Sequence[int]],
+    source_paths: Sequence[str],
+    target_paths: Sequence[str],
+    results_path: str,
+    metrics_path: Optional[str] = None,
+    ground_truth: Optional[Sequence[Sequence[int]]] = None,
+    top_k: int = 5,
+) -> Dict[str, Optional[str]]:
+    """Write ranked source/target matches and optional retrieval metrics.
+
+    Accuracy is the fraction of target queries with at least one correct source
+    in the top-k results. Precision, recall, and F1 are micro-averaged over all
+    source/target pairs at each cutoff.
+    """
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    if len(predictions) != len(target_paths):
+        raise ValueError("predictions must contain one row per target image")
+    if ground_truth is not None and len(ground_truth) != len(target_paths):
+        raise ValueError("ground_truth must contain one row per target image")
+
+    ranked_predictions: List[List[int]] = []
+    for target_index, prediction in enumerate(predictions):
+        unique = []
+        seen = set()
+        for raw_index in prediction:
+            source_index = int(raw_index)
+            if source_index < 0 or source_index >= len(source_paths):
+                raise ValueError(
+                    f"prediction for target {target_index} contains invalid source index "
+                    f"{source_index}"
+                )
+            if source_index not in seen:
+                seen.add(source_index)
+                unique.append(source_index)
+            if len(unique) == top_k:
+                break
+        ranked_predictions.append(unique)
+
+    truth_sets = None
+    if ground_truth is not None:
+        truth_sets = [
+            {
+                int(value)
+                for value in values
+                if 0 <= int(value) < len(source_paths)
+            }
+            for values in ground_truth
+        ]
+        missing_truth = [index for index, values in enumerate(truth_sets) if not values]
+        if missing_truth:
+            raise ValueError(
+                "ground_truth contains no valid source index for target "
+                + str(missing_truth[0])
+            )
+
+    os.makedirs(os.path.dirname(os.path.abspath(results_path)), exist_ok=True)
+    with open(results_path, "w", encoding="utf-8", newline="") as output_file:
+        fieldnames = [
+            "target_index",
+            "target",
+            "rank",
+            "source_index",
+            "source",
+            "is_correct",
+        ]
+        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for target_index, prediction in enumerate(ranked_predictions):
+            for rank, source_index in enumerate(prediction, start=1):
+                is_correct: Any = ""
+                if truth_sets is not None:
+                    is_correct = source_index in truth_sets[target_index]
+                writer.writerow(
+                    {
+                        "target_index": target_index,
+                        "target": str(target_paths[target_index]),
+                        "rank": rank,
+                        "source_index": source_index,
+                        "source": str(source_paths[source_index]),
+                        "is_correct": is_correct,
+                    }
+                )
+
+    written_metrics = None
+    if truth_sets is not None:
+        if not metrics_path:
+            raise ValueError("metrics_path is required when ground_truth is supplied")
+        os.makedirs(os.path.dirname(os.path.abspath(metrics_path)), exist_ok=True)
+        with open(metrics_path, "w", encoding="utf-8", newline="") as output_file:
+            fieldnames = [
+                "top_k",
+                "query_count",
+                "correct_queries",
+                "true_positives",
+                "false_positives",
+                "false_negatives",
+                "precision",
+                "recall",
+                "accuracy",
+                "f1",
+            ]
+            writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+            writer.writeheader()
+            for cutoff in range(1, top_k + 1):
+                true_positives = 0
+                predicted_positives = 0
+                actual_positives = sum(len(values) for values in truth_sets)
+                correct_queries = 0
+                for prediction, expected in zip(ranked_predictions, truth_sets):
+                    selected = set(prediction[:cutoff])
+                    matches = len(selected & expected)
+                    true_positives += matches
+                    predicted_positives += len(selected)
+                    correct_queries += int(matches > 0)
+                false_positives = predicted_positives - true_positives
+                false_negatives = actual_positives - true_positives
+                precision = (
+                    true_positives / predicted_positives if predicted_positives else 0.0
+                )
+                recall = true_positives / actual_positives if actual_positives else 0.0
+                accuracy = correct_queries / len(target_paths) if target_paths else 0.0
+                f1 = (
+                    2.0 * precision * recall / (precision + recall)
+                    if precision + recall
+                    else 0.0
+                )
+                writer.writerow(
+                    {
+                        "top_k": cutoff,
+                        "query_count": len(target_paths),
+                        "correct_queries": correct_queries,
+                        "true_positives": true_positives,
+                        "false_positives": false_positives,
+                        "false_negatives": false_negatives,
+                        "precision": precision,
+                        "recall": recall,
+                        "accuracy": accuracy,
+                        "f1": f1,
+                    }
+                )
+        written_metrics = metrics_path
+
+    return {"results": results_path, "metrics": written_metrics}
 
 
 def save_queries(

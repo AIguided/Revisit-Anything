@@ -149,7 +149,7 @@ To perform environment setup, dependency installation, SAM installation, and dat
 ./setup_run_vector_db.sh ./dataset/17places_full/17places --repeats 10
 ```
 
-The bootstrap launcher creates `segvlad` if needed, installs missing packages, verifies imports, and then delegates to `run_vector_db.sh`. For custom image folders, pass the same `--dataset custom`, `--source-dir`, `--query-dir`, and `--preprocess` options documented below.
+The bootstrap launcher creates `segvlad` if needed, installs missing packages, verifies imports, and then delegates to `run_vector_db.sh`. For custom image folders, pass the same `--dataset custom`, `--source-dir`, `--target-dir`, and `--preprocess` options documented below. `--query-dir` remains available as an alias for `--target-dir`.
 
 ## Persistent vector database and query benchmark
 
@@ -195,7 +195,7 @@ Create the environment, generate missing SAM/DINO/PCA artifacts, build the FAISS
 ./setup_run_vector_db.sh \
     --dataset custom \
     --source-dir /path/to/my_dataset/ref \
-    --query-dir /path/to/my_dataset/query \
+    --target-dir /path/to/my_dataset/query \
     --output-dir /path/to/my_dataset/out \
     --sam-checkpoint /path/to/sam_vit_h_4b8939.pth \
     --preprocess \
@@ -208,7 +208,7 @@ If the four H5 files and PCA model already exist, skip preprocessing:
 ./setup_run_vector_db.sh \
     --dataset custom \
     --source-dir /path/to/my_dataset/ref \
-    --query-dir /path/to/my_dataset/query \
+    --target-dir /path/to/my_dataset/query \
     --output-dir /path/to/my_dataset/out \
     --no-preprocess
 ```
@@ -219,8 +219,29 @@ The custom run writes `custom_r_masks_320.h5`, `custom_q_masks_320.h5`, DINO des
 - `.metadata.npz`: segment-to-reference-image mapping and source image paths.
 - `.queries.npz`: normalized query vectors, per-image offsets, and query paths.
 - `.benchmark.json`: per-image mean, p50, p95, and p99 lookup latency plus image and segment QPS.
+- `.results.csv`: each target image and its ranked source-image matches.
+- `.metrics.csv`: precision, recall, top-k accuracy, and F1 for each rank cutoff.
 
-Custom datasets do not need ground-truth labels for database creation or performance benchmarking.
+Custom datasets do not need ground-truth labels for database creation or performance benchmarking. A result CSV is still written, with an empty `is_correct` field. To also generate metrics, provide a CSV containing one or more correct `source,target` pairs per target image:
+
+```csv
+source,target
+person_01_reference.jpg,person_01_query.jpg
+person_02_reference.jpg,person_02_query.jpg
+```
+
+The values may be image indexes, full paths, or unique filenames. Then run:
+
+```
+./run_vector_db.sh \
+    --dataset custom \
+    --source-dir /path/to/my_dataset/ref \
+    --target-dir /path/to/my_dataset/query \
+    --ground-truth-csv /path/to/my_dataset/ground_truth.csv \
+    --preprocess
+```
+
+Use `--result-csv`, `--metrics-csv`, and `--evaluation-top-k` to override the output paths and the default top-5 evaluation.
 
 The benchmark measures FAISS lookup of all segment vectors belonging to one image. Therefore, `image_queries_per_second` is lookup-only: it excludes image loading, SAM/DINO extraction, VLAD/PCA encoding, index construction, disk writes, and recall evaluation. Measure the complete command with the system timer:
 
@@ -232,11 +253,11 @@ The benchmark measures FAISS lookup of all segment vectors belonging to one imag
 
 Use `run_vector_db.sh` instead of `setup_run_vector_db.sh` when you want to exclude environment/package setup. Change the output location and benchmark settings with `--vector-db-dir`, `--benchmark-top-k`, `--benchmark-warmup`, and `--benchmark-repeats`.
 
-### Accuracy and recall
+### Precision, accuracy, recall, and F1
 
 For `17places`, accuracy is reported in the terminal at the end of the run. The line `Max Seg Logs: [...]` contains recall@1 through recall@5; for example, `[0.95, 0.97, ...]` means 95% recall@1 and 97% recall@2. The `POSITIVES/TOTAL` line shows the number of successful queries out of the total.
 
-The raw matches and distances are also saved under `<output-dir>/results/global/<run>/` in the `*_matches_sims_*.pkl` file. The `.benchmark.json` file contains lookup speed only, not accuracy. Custom datasets currently have no recall score unless ground-truth correspondences are added.
+The raw matches and distances are also saved under `<output-dir>/results/global/<run>/` in the `*_matches_sims_*.pkl` file. The `.results.csv` file contains the ranked source/target pairs. The `.metrics.csv` file reports micro precision, micro recall, top-k query accuracy, and micro F1. The `.benchmark.json` file contains lookup speed only, not accuracy.
 
 To benchmark the saved database again without running feature generation or recall evaluation:
 

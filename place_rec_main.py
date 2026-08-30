@@ -43,10 +43,12 @@ from segvlad_vector_db import (
     benchmark_index,
     build_flat_l2_index,
     build_image_offsets,
+    load_ground_truth_csv,
     prepare_vectors,
     save_benchmark,
     save_database,
     save_queries,
+    save_retrieval_csv,
 )
 
 # matplotlib.use('TkAgg')
@@ -57,7 +59,25 @@ current_time = datetime.datetime.now().strftime("%d%m%Y_%H%M%S")
 # from sklearn.neighbors import NearestNeighbors
 # from sklearn.neighbors import KDTree
 
-def recall_segloc(workdir, dataset_name, experiment_config,experiment_name, segFtVLAD1, segFtVLAD2, gt, segRange2, imInds1, map_calculate, domain, save_results=True):
+def recall_segloc(
+    workdir,
+    dataset_name,
+    experiment_config,
+    experiment_name,
+    segFtVLAD1,
+    segFtVLAD2,
+    gt,
+    segRange2,
+    imInds1,
+    map_calculate,
+    domain,
+    source_paths,
+    target_paths,
+    results_csv,
+    metrics_csv,
+    evaluation_top_k=5,
+    save_results=True,
+):
 
     # RECALL CALCULATION
     normalize_vectors = bool(experiment_config["pca"])
@@ -88,17 +108,46 @@ def recall_segloc(workdir, dataset_name, experiment_config,experiment_name, segF
     sims_50 =2-sims_50#.T[0]
     # matches_justfirstone = matches.T[0]
     # sims =2-sims.T[0]
-    max_seg_preds = func_vpr.get_matches(matches_50,gt,sims_50,segRange2,imInds1,n=5,method="max_seg_topk_wt_borda_Im")
-    max_seg_recalls = func_vpr.calc_recall(max_seg_preds, gt, 5)
+    ranking_gt = gt
+    if ranking_gt is None:
+        ranking_gt = [np.asarray([], dtype=np.int64) for _ in target_paths]
+    max_seg_preds = func_vpr.get_matches(
+        matches_50,
+        ranking_gt,
+        sims_50,
+        segRange2,
+        imInds1,
+        n=evaluation_top_k,
+        method="max_seg_topk_wt_borda_Im",
+    )
+
+    csv_paths = save_retrieval_csv(
+        max_seg_preds,
+        source_paths,
+        target_paths,
+        results_csv,
+        metrics_csv,
+        ground_truth=gt,
+        top_k=evaluation_top_k,
+    )
+    print("Ranked source/target results saved to", csv_paths["results"])
+
+    max_seg_recalls = None
+    if gt is not None:
+        max_seg_recalls = func_vpr.calc_recall(max_seg_preds, gt, evaluation_top_k)
+        print("Precision, recall, accuracy, and F1 saved to", csv_paths["metrics"])
 
     print("VLAD + PCA Results \n ")
-    if map_calculate:
+    if map_calculate and gt is not None:
         # mAP calculation
         queries_results = func_vpr.convert_to_queries_results_for_map(max_seg_preds, gt)
         map_value = func_vpr.calculate_map(queries_results)
         print(f"Mean Average Precision (mAP): {map_value}")
 
-    print("Max Seg Logs: ", max_seg_recalls)
+    if max_seg_recalls is not None:
+        print("Max Seg Logs: ", max_seg_recalls)
+    else:
+        print("No ground truth supplied; result CSV written without accuracy metrics.")
     
     return max_seg_recalls
 
@@ -114,12 +163,18 @@ if __name__=="__main__":
     parser.add_argument('--benchmark-top-k', type=int, default=200, help='Number of nearest segments used by the lookup benchmark')
     parser.add_argument('--benchmark-warmup', type=int, default=1, help='Unmeasured benchmark passes')
     parser.add_argument('--benchmark-repeats', type=int, default=5, help='Measured benchmark passes')
+    parser.add_argument('--ground-truth-csv', default=None, help='CSV containing correct source,target image pairs')
+    parser.add_argument('--result-csv', default=None, help='Ranked source/target result CSV path')
+    parser.add_argument('--metrics-csv', default=None, help='Precision/recall/accuracy/F1 CSV path')
+    parser.add_argument('--evaluation-top-k', type=int, default=5, help='Image ranks written to result and metrics CSV files')
 
 
     topk_value = 5 # This gives all results from recall@1 to 5 
     map_calculate = False  #Mean average precision: False always except to replicate certain results in supplementary.
 
     args = parser.parse_args()
+    if args.evaluation_top_k <= 0:
+        raise ValueError("--evaluation-top-k must be positive")
 
     save_results = args.save_results 
     print("Save results: ", save_results)
@@ -155,6 +210,8 @@ if __name__=="__main__":
     vector_db_dir = args.vector_db_dir or os.path.join(workdir, "vector_db")
     vector_db_name = f"{args.dataset}_{args.experiment}_{args.vocab_vlad}"
     vector_db_paths = artifact_paths(vector_db_dir, vector_db_name)
+    results_csv_path = args.result_csv or vector_db_paths["results"]
+    metrics_csv_path = args.metrics_csv or vector_db_paths["metrics"]
 
     save_path_results = f"{workdir}/results/"
 
@@ -192,6 +249,12 @@ if __name__=="__main__":
     ims1_r = ims1_r[ims_sidx:ims_eidx][::ims_step]
     ims2_q = natsorted(list_image_names(dataPath2_q))
     ims2_q = ims2_q[ims_sidx:ims_eidx][::ims_step]
+    source_paths = [
+        os.path.abspath(os.path.join(dataPath1_r, image_name)) for image_name in ims1_r
+    ]
+    target_paths = [
+        os.path.abspath(os.path.join(dataPath2_q, image_name)) for image_name in ims2_q
+    ]
 
     # dataset specific ground truth
     gt = get_gt(
@@ -202,6 +265,11 @@ if __name__=="__main__":
     ims2_q=ims2_q,          
     func_vpr_module=func_vpr
     )
+    if args.ground_truth_csv:
+        gt = load_ground_truth_csv(
+            args.ground_truth_csv, source_paths, target_paths
+        )
+        print("Ground truth loaded from", args.ground_truth_csv)
 
     if experiment_config["global_method_name"] == "SegLoc":
         dh = cfg['desired_height'] // 14
@@ -316,15 +384,11 @@ if __name__=="__main__":
             vector_db_index = build_flat_l2_index(database_vectors)
 
             if args.save_vector_db:
-                reference_paths = [
-                    os.path.abspath(os.path.join(dataPath1_r, image_name))
-                    for image_name in ims1_r
-                ]
                 save_database(
                     vector_db_index,
                     database_vectors,
                     imInds1,
-                    reference_paths,
+                    source_paths,
                     vector_db_dir,
                     vector_db_name,
                     vector_db_normalized,
@@ -410,14 +474,10 @@ if __name__=="__main__":
             query_offsets = build_image_offsets(imInds2, len(ims2_q))
 
             if args.save_vector_db:
-                query_paths = [
-                    os.path.abspath(os.path.join(dataPath2_q, image_name))
-                    for image_name in ims2_q
-                ]
                 save_queries(
                     query_vectors,
                     imInds2,
-                    query_paths,
+                    target_paths,
                     vector_db_paths["queries"],
                     vector_db_normalized,
                 )
@@ -462,13 +522,29 @@ if __name__=="__main__":
                 pickle.dump(segFtVLAD2, file)
             print(f"segFtVLAD2 tensor saved to {pkl_file_results2}")
 
-        # RECALL CALCULATION
+        # RETRIEVAL RESULTS AND METRICS
+        recall_segrec = recall_segloc(
+            workdir,
+            args.dataset,
+            experiment_config,
+            experiment_name,
+            segFtVLAD1,
+            segFtVLAD2,
+            gt,
+            segRange2,
+            imInds1,
+            map_calculate,
+            domain,
+            source_paths,
+            target_paths,
+            results_csv_path,
+            metrics_csv_path,
+            args.evaluation_top_k,
+            save_results,
+        )
         if gt is not None:
-            recall_segrec = recall_segloc(workdir, args.dataset, experiment_config, experiment_name, segFtVLAD1, segFtVLAD2, gt, segRange2, imInds1, map_calculate, domain, save_results)
             print("VLAD + PCA RESULTS for segloc for dataset config: ", dataset_config, " ::: experiment config ::: ", experiment_config, " using pca file : ", pca_model_path, "experiment_name: ", experiment_name)
             print(recall_segrec)
-        else:
-            print("No ground truth is configured; vector database and query benchmark completed without recall metrics.")
 
 
 

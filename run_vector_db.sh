@@ -11,14 +11,21 @@ vocab="auto"
 top_k=200
 warmup=1
 repeats=5
+evaluation_top_k=5
 preprocess="ask"
 sam_checkpoint=""
+ground_truth_csv=""
+result_csv=""
+metrics_csv=""
+conda_prefix="${SEGVLAD_CONDA_PREFIX:-${CONDA_PREFIX:-}}"
+python_selection_explicit="false"
 if [[ -n "${PYTHON_BIN:-}" ]]; then
     python_bin="$PYTHON_BIN"
-elif [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
+    python_selection_explicit="true"
+elif [[ -n "$conda_prefix" && -x "$conda_prefix/bin/python" ]]; then
     # A nested virtualenv (for example .claudeapikey) can shadow `python`
     # even after `conda activate segvlad`; prefer the active Conda prefix.
-    python_bin="$CONDA_PREFIX/bin/python"
+    python_bin="$conda_prefix/bin/python"
 else
     python_bin="python"
 fi
@@ -30,12 +37,17 @@ Usage:
 
 The selection is terminal-only. SOURCE_DIR can be a 17places/custom root
 containing ref/ and query/, or a directory containing arbitrary reference
-images. For a plain image directory, also choose --query-dir.
+images. For a plain image directory, also choose --target-dir.
 
 Options:
   --source-dir PATH     Reference image directory or dataset root
-  --query-dir PATH      Custom query image directory
+  --target-dir PATH     Target/query image directory
+  --query-dir PATH      Alias for --target-dir
   --output-dir PATH     Custom preprocessing/database output directory
+  --ground-truth-csv P  CSV with correct source,target image pairs
+  --result-csv PATH     Ranked source/target output CSV
+  --metrics-csv PATH    Precision/recall/accuracy/F1 output CSV
+  --evaluation-top-k N  Image ranks evaluated in CSV output (default: 5)
   --dataset VALUE       auto, 17places, or custom (default: auto)
   --vocab VALUE         auto, domain, or map (default: auto)
   --preprocess          Run SAM, DINO, and PCA when artifacts are missing
@@ -45,12 +57,13 @@ Options:
   --warmup N            Unmeasured benchmark passes (default: 1)
   --repeats N           Measured benchmark passes (default: 5)
   --python PATH         Python executable from the segvlad environment
+  --conda-prefix PATH   Conda environment prefix (also accepted as --prefix)
   -h, --help            Show this help
 
 Examples:
   ./run_vector_db.sh /data/17places
-  ./run_vector_db.sh --source-dir /data/my_refs --query-dir /data/my_queries --preprocess
-  ./run_vector_db.sh --dataset custom --source-dir /data/set/ref --query-dir /data/set/query --output-dir /data/set/out
+  ./run_vector_db.sh --source-dir /data/my_refs --target-dir /data/my_queries --preprocess
+  ./run_vector_db.sh --dataset custom --source-dir /data/set/ref --target-dir /data/set/query --ground-truth-csv /data/set/ground_truth.csv
 EOF
 }
 
@@ -73,15 +86,20 @@ need_value() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --source-dir) need_value "$@"; source_dir="$2"; shift 2 ;;
-        --query-dir) need_value "$@"; query_dir="$2"; shift 2 ;;
+        --query-dir|--target-dir) need_value "$@"; query_dir="$2"; shift 2 ;;
         --output-dir) need_value "$@"; output_dir="$2"; shift 2 ;;
+        --ground-truth-csv) need_value "$@"; ground_truth_csv="$2"; shift 2 ;;
+        --result-csv) need_value "$@"; result_csv="$2"; shift 2 ;;
+        --metrics-csv) need_value "$@"; metrics_csv="$2"; shift 2 ;;
+        --evaluation-top-k) need_value "$@"; evaluation_top_k="$2"; shift 2 ;;
         --dataset) need_value "$@"; dataset="$2"; shift 2 ;;
         --vocab) need_value "$@"; vocab="$2"; shift 2 ;;
         --sam-checkpoint) need_value "$@"; sam_checkpoint="$2"; shift 2 ;;
         --top-k) need_value "$@"; top_k="$2"; shift 2 ;;
         --warmup) need_value "$@"; warmup="$2"; shift 2 ;;
         --repeats) need_value "$@"; repeats="$2"; shift 2 ;;
-        --python) need_value "$@"; python_bin="$2"; shift 2 ;;
+        --python) need_value "$@"; python_bin="$2"; python_selection_explicit="true"; shift 2 ;;
+        --conda-prefix|--prefix) need_value "$@"; conda_prefix="$2"; python_bin="$conda_prefix/bin/python"; python_selection_explicit="true"; shift 2 ;;
         --preprocess) preprocess="yes"; shift ;;
         --no-preprocess) preprocess="no"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -101,6 +119,7 @@ done
 [[ "$top_k" =~ ^[1-9][0-9]*$ ]] || fail "--top-k must be a positive integer"
 [[ "$warmup" =~ ^[0-9]+$ ]] || fail "--warmup must be a non-negative integer"
 [[ "$repeats" =~ ^[1-9][0-9]*$ ]] || fail "--repeats must be a positive integer"
+[[ "$evaluation_top_k" =~ ^[1-9][0-9]*$ ]] || fail "--evaluation-top-k must be a positive integer"
 
 if [[ -z "$source_dir" ]]; then
     read -r -e -p "Reference images or dataset directory: " source_dir
@@ -163,6 +182,10 @@ fi
 if ! has_images "$query_dir"; then
     fail "no query images found in $query_dir"
 fi
+if [[ -n "$ground_truth_csv" ]]; then
+    [[ -f "$ground_truth_csv" ]] || fail "ground-truth CSV does not exist: $ground_truth_csv"
+    ground_truth_csv="$(cd -- "$(dirname -- "$ground_truth_csv")" && pwd -P)/$(basename -- "$ground_truth_csv")"
+fi
 
 command -v "$python_bin" >/dev/null 2>&1 || fail "Python executable not found: $python_bin"
 
@@ -203,7 +226,7 @@ PY
 }
 
 missing_modules="$(missing_python_modules "$python_bin")"
-if [[ -n "$missing_modules" && -z "${PYTHON_BIN:-}" ]] && command -v conda >/dev/null 2>&1; then
+if [[ -n "$missing_modules" && "$python_selection_explicit" == "false" ]] && command -v conda >/dev/null 2>&1; then
     segvlad_prefix="$(conda env list 2>/dev/null | awk '$1 == "segvlad" { print $NF; exit }')"
     if [[ -n "$segvlad_prefix" && -x "$segvlad_prefix/bin/python" ]]; then
         candidate_python="$segvlad_prefix/bin/python"
@@ -296,6 +319,10 @@ echo "Output: $output_dir"
 echo "Vocabulary: $vocab"
 
 cd -- "$script_dir"
+evaluation_args=(--evaluation-top-k "$evaluation_top_k")
+[[ -n "$ground_truth_csv" ]] && evaluation_args+=(--ground-truth-csv "$ground_truth_csv")
+[[ -n "$result_csv" ]] && evaluation_args+=(--result-csv "$result_csv")
+[[ -n "$metrics_csv" ]] && evaluation_args+=(--metrics-csv "$metrics_csv")
 env "${common_env[@]}" "$python_bin" place_rec_main.py \
     --dataset "$dataset" \
     --experiment exp0_global_SegLoc_VLAD_PCA_o3 \
@@ -305,10 +332,17 @@ env "${common_env[@]}" "$python_bin" place_rec_main.py \
     --benchmark-vector-db \
     --benchmark-top-k "$top_k" \
     --benchmark-warmup "$warmup" \
-    --benchmark-repeats "$repeats"
+    --benchmark-repeats "$repeats" \
+    "${evaluation_args[@]}"
 
 artifact_name="${dataset}_exp0_global_SegLoc_VLAD_PCA_o3_${vocab}"
 echo
 echo "Database: $output_dir/vector_db/$artifact_name.faiss"
 echo "Metadata: $output_dir/vector_db/$artifact_name.metadata.npz"
 echo "Benchmark: $output_dir/vector_db/$artifact_name.benchmark.json"
+echo "Results: ${result_csv:-$output_dir/vector_db/$artifact_name.results.csv}"
+if [[ -n "$ground_truth_csv" || "$dataset" != "custom" ]]; then
+    echo "Metrics: ${metrics_csv:-$output_dir/vector_db/$artifact_name.metrics.csv}"
+else
+    echo "Metrics: not written (provide --ground-truth-csv for a custom dataset)"
+fi

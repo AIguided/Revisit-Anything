@@ -40,7 +40,6 @@ import importlib
 import sys 
 sys.path.append('VLAD-BuFF')
 # import utils
-import vpr_model
 import torch.nn.functional as F
 # matplotlib.use('TkAgg')
 workdir = '/media/kartik/data/kartik/data/segrec/out'
@@ -1677,6 +1676,8 @@ def normalizeFeat(rfts):
 
 from argparse import Namespace
 def loadDINONV(cfg, ckpt_path, device="cuda:0", feat_type ='agg'):
+    import vpr_model
+
     agg_config = {
             "expName": "dnv2_NV",
             "useFC": False,
@@ -1768,6 +1769,8 @@ def process_DINONV(model,ims,cfg,h5FullPath,dataPath):
 
 
 def loadDINOSALAD(cfg, ckpt_path, device="cuda;0", feat_type ='backbone'):
+    import vpr_model
+
     model = vpr_model.VPRModel(
         backbone_arch='dinov2_vitb14',
         backbone_config={

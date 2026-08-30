@@ -11,7 +11,13 @@ import sys
 # import nbr_agg
 
 import argparse
-from place_rec_global_config import datasets, experiments, workdir_data
+from place_rec_global_config import (
+    datasets,
+    experiments,
+    list_image_names,
+    resolve_dataset_paths,
+    workdir_data,
+)
 from gt import get_gt
 
 
@@ -32,6 +38,16 @@ import pickle
 import faiss
 import json
 from importlib import reload
+from segvlad_vector_db import (
+    artifact_paths,
+    benchmark_index,
+    build_flat_l2_index,
+    build_image_offsets,
+    prepare_vectors,
+    save_benchmark,
+    save_database,
+    save_queries,
+)
 
 # matplotlib.use('TkAgg')
 matplotlib.use('Agg') #Headless
@@ -44,20 +60,11 @@ current_time = datetime.datetime.now().strftime("%d%m%Y_%H%M%S")
 def recall_segloc(workdir, dataset_name, experiment_config,experiment_name, segFtVLAD1, segFtVLAD2, gt, segRange2, imInds1, map_calculate, domain, save_results=True):
 
     # RECALL CALCULATION
-    # if pca then d = 512 else d = 49152
-    if experiment_config["pca"]:
-        d = 1024 #512 #PCA Dimension
-        print("POTENTIAL CAUSE for error: Using d in pca before index faiss as", d, "\n 1024 or 512, check properly")
-    else:
-        d = 49152 #VLAD Dimension
-    index = faiss.IndexFlatL2(d)
-    if experiment_config["pca"]:
-        index.add(func_vpr.normalizeFeat(segFtVLAD1.numpy()))
-        sims, matches = index.search(func_vpr.normalizeFeat(segFtVLAD2.numpy()),200)
-    else:
-        index.add(segFtVLAD1.numpy())
-        # sims, matches = index.search(segFtVLAD2.numpy(), 100)
-        sims, matches = index.search(segFtVLAD2.numpy(), 200)
+    normalize_vectors = bool(experiment_config["pca"])
+    database_vectors = prepare_vectors(segFtVLAD1, normalize_vectors)
+    query_vectors = prepare_vectors(segFtVLAD2, normalize_vectors)
+    index = build_flat_l2_index(database_vectors)
+    sims, matches = index.search(query_vectors, min(200, index.ntotal))
     # matches = matches.T[0]
     if save_results:
         out_folder = f"{workdir}/results/global/"
@@ -101,6 +108,12 @@ if __name__=="__main__":
     parser.add_argument('--experiment', required=True, help='Experiment name') 
     parser.add_argument('--vocab-vlad',required=True, choices=['domain', 'map'], help='Vocabulary choice for VLAD. Options: map, domain.')
     parser.add_argument('--save-results', action='store_true', help='Save results to file')
+    parser.add_argument('--save-vector-db', action='store_true', help='Save a reusable FAISS index, source metadata, and query vectors')
+    parser.add_argument('--benchmark-vector-db', action='store_true', help='Benchmark FAISS lookup latency per query image')
+    parser.add_argument('--vector-db-dir', default=None, help='Vector database output directory; defaults to <dataset>/out/vector_db')
+    parser.add_argument('--benchmark-top-k', type=int, default=200, help='Number of nearest segments used by the lookup benchmark')
+    parser.add_argument('--benchmark-warmup', type=int, default=1, help='Unmeasured benchmark passes')
+    parser.add_argument('--benchmark-repeats', type=int, default=5, help='Measured benchmark passes')
 
 
     topk_value = 5 # This gives all results from recall@1 to 5 
@@ -123,6 +136,10 @@ if __name__=="__main__":
     experiment_config = experiments.get(args.experiment, {})
     if not experiment_config:
         raise ValueError(f"Experiment '{args.experiment}' not found in configuration.")
+    if (
+        args.save_vector_db or args.benchmark_vector_db
+    ) and experiment_config["global_method_name"] != "SegLoc":
+        raise ValueError("Vector database export currently supports SegLoc experiments only")
 
     print("The selected dataset config is: \n", dataset_config)
     print("The selected experiment config is: \n", experiment_config)
@@ -130,8 +147,14 @@ if __name__=="__main__":
     cfg = dataset_config['cfg']
 
 
-    workdir = f'{workdir_data}/{args.dataset}/out'
+    _, workdir, dataPath1_r, dataPath2_q = resolve_dataset_paths(
+        args.dataset, dataset_config
+    )
     os.makedirs(workdir, exist_ok=True)
+
+    vector_db_dir = args.vector_db_dir or os.path.join(workdir, "vector_db")
+    vector_db_name = f"{args.dataset}_{args.experiment}_{args.vocab_vlad}"
+    vector_db_paths = artifact_paths(vector_db_dir, vector_db_name)
 
     save_path_results = f"{workdir}/results/"
 
@@ -159,18 +182,15 @@ if __name__=="__main__":
     vlad.fit(None)
 
     #Load Descriptors
-    dataPath1_r = f"{workdir_data}/{args.dataset}/{dataset_config['data_subpath1_r']}/"
-    dataPath2_q = f"{workdir_data}/{args.dataset}/{dataset_config['data_subpath2_q']}/"
-
     dino_r_path = f"{workdir}/{dataset_config['dino_h5_filename_r']}"
     dino_q_path = f"{workdir}/{dataset_config['dino_h5_filename_q']}"
     dino1_h5_r = h5py.File(dino_r_path, 'r')
     dino2_h5_q = h5py.File(dino_q_path, 'r')
 
     ims_sidx, ims_eidx, ims_step = 0, None, 1
-    ims1_r = natsorted(os.listdir(f'{dataPath1_r}'))
+    ims1_r = natsorted(list_image_names(dataPath1_r))
     ims1_r = ims1_r[ims_sidx:ims_eidx][::ims_step]
-    ims2_q = natsorted(os.listdir(f'{dataPath2_q}'))
+    ims2_q = natsorted(list_image_names(dataPath2_q))
     ims2_q = ims2_q[ims_sidx:ims_eidx][::ims_step]
 
     # dataset specific ground truth
@@ -289,6 +309,37 @@ if __name__=="__main__":
         for i in range(imInds1[-1]+1):
             segRange1.append(np.where(imInds1==i)[0])
 
+        vector_db_index = None
+        vector_db_normalized = bool(experiment_config["pca"])
+        if args.save_vector_db or args.benchmark_vector_db:
+            database_vectors = prepare_vectors(segFtVLAD1, vector_db_normalized)
+            vector_db_index = build_flat_l2_index(database_vectors)
+
+            if args.save_vector_db:
+                reference_paths = [
+                    os.path.abspath(os.path.join(dataPath1_r, image_name))
+                    for image_name in ims1_r
+                ]
+                save_database(
+                    vector_db_index,
+                    database_vectors,
+                    imInds1,
+                    reference_paths,
+                    vector_db_dir,
+                    vector_db_name,
+                    vector_db_normalized,
+                    extra_metadata={
+                        "dataset": args.dataset,
+                        "experiment": args.experiment,
+                        "vocab_vlad": args.vocab_vlad,
+                        "vlad_cluster": domain,
+                        "pca": bool(experiment_config["pca"]),
+                        "source_root": os.path.abspath(dataPath1_r),
+                    },
+                )
+                print(f"FAISS vector database saved to {vector_db_paths['index']}")
+                print(f"Source metadata saved to {vector_db_paths['metadata']}")
+
         if save_results:
             out_folder = f"{workdir}/results/global/"
             if not os.path.exists(out_folder):
@@ -354,6 +405,48 @@ if __name__=="__main__":
         for i in range(imInds2[-1]+1):
             segRange2.append(np.where(imInds2==i)[0])
 
+        if args.save_vector_db or args.benchmark_vector_db:
+            query_vectors = prepare_vectors(segFtVLAD2, vector_db_normalized)
+            query_offsets = build_image_offsets(imInds2, len(ims2_q))
+
+            if args.save_vector_db:
+                query_paths = [
+                    os.path.abspath(os.path.join(dataPath2_q, image_name))
+                    for image_name in ims2_q
+                ]
+                save_queries(
+                    query_vectors,
+                    imInds2,
+                    query_paths,
+                    vector_db_paths["queries"],
+                    vector_db_normalized,
+                )
+                print(f"Query benchmark vectors saved to {vector_db_paths['queries']}")
+
+            if args.benchmark_vector_db:
+                benchmark_target = vector_db_index
+                if args.save_vector_db:
+                    # Reload the serialized index so the benchmark validates the artifact.
+                    benchmark_target = faiss.read_index(vector_db_paths["index"])
+                benchmark_result = benchmark_index(
+                    benchmark_target,
+                    query_vectors,
+                    query_offsets,
+                    top_k=args.benchmark_top_k,
+                    warmup=args.benchmark_warmup,
+                    repeats=args.benchmark_repeats,
+                )
+                benchmark_result.update({
+                    "dataset": args.dataset,
+                    "experiment": args.experiment,
+                    "vocab_vlad": args.vocab_vlad,
+                    "faiss_threads": faiss.omp_get_max_threads(),
+                })
+                save_benchmark(benchmark_result, vector_db_paths["benchmark"])
+                print("FAISS per-image lookup benchmark:")
+                print(json.dumps(benchmark_result, indent=2, sort_keys=True))
+                print(f"Benchmark saved to {vector_db_paths['benchmark']}")
+
         if save_results:
             out_folder = f"{workdir}/results/global/"
             if not os.path.exists(out_folder):
@@ -370,9 +463,12 @@ if __name__=="__main__":
             print(f"segFtVLAD2 tensor saved to {pkl_file_results2}")
 
         # RECALL CALCULATION
-        recall_segrec = recall_segloc(workdir, args.dataset, experiment_config, experiment_name, segFtVLAD1, segFtVLAD2, gt, segRange2, imInds1, map_calculate, domain, save_results)
-        print("VLAD + PCA RESULTS for segloc for dataset config: ", dataset_config, " ::: experiment config ::: ", experiment_config, " using pca file : ", pca_model_path, "experiment_name: ", experiment_name)
-        print(recall_segrec)
+        if gt is not None:
+            recall_segrec = recall_segloc(workdir, args.dataset, experiment_config, experiment_name, segFtVLAD1, segFtVLAD2, gt, segRange2, imInds1, map_calculate, domain, save_results)
+            print("VLAD + PCA RESULTS for segloc for dataset config: ", dataset_config, " ::: experiment config ::: ", experiment_config, " using pca file : ", pca_model_path, "experiment_name: ", experiment_name)
+            print(recall_segrec)
+        else:
+            print("No ground truth is configured; vector database and query benchmark completed without recall metrics.")
 
 
 

@@ -13,7 +13,12 @@ import numpy as np
 
 import argparse
 import func_vpr 
-from place_rec_global_config import datasets, workdir_data
+from place_rec_global_config import (
+    datasets,
+    list_image_names,
+    resolve_dataset_paths,
+    workdir_data,
+)
 
 
 def set_extraction_method(method):
@@ -62,14 +67,13 @@ if __name__=="__main__":
             width_DINO, height_DINO =  cfg['desired_width'], cfg['desired_height']
             print(f"Note: The dimensions being used for SAM extraction are {width_SAM}x{height_SAM} pixels and for DINO extraction are {width_DINO}x{height_DINO} pixels.")
 
-    workdir = f'{workdir_data}/{args.dataset}/out'
+    _, workdir, dataPath1_r, dataPath2_q = resolve_dataset_paths(
+        args.dataset, dataset_config
+    )
     os.makedirs(workdir, exist_ok=True)
     save_path_results = f"{workdir}/results/"
 
     ims_sidx, ims_eidx, ims_step = 0, None, 1
-
-    dataPath1_r = f"{workdir_data}/{args.dataset}/{dataset_config['data_subpath1_r']}/"
-    dataPath2_q = f"{workdir_data}/{args.dataset}/{dataset_config['data_subpath2_q']}/"
 
     if FastSAM_extraction:
         sam_checkpoint = f"{workdir_data}/models/FastSAM/FastSAM-x.pt"
@@ -77,7 +81,10 @@ if __name__=="__main__":
             {"dataPath": dataPath1_r, "h5FullPathDINO": f"{workdir}/{args.dataset}_r_dino_{width_DINO}.h5",  "h5FullPathSAM": f"{workdir}/{args.dataset}_r_FastSAM_masks_{width_SAM}.h5"},
             {"dataPath": dataPath2_q, "h5FullPathDINO": f"{workdir}/{args.dataset}_q_dino_{width_DINO}.h5", "h5FullPathSAM": f"{workdir}/{args.dataset}_q_FastSAM_masks_{width_SAM}.h5"} ]
     else:
-        sam_checkpoint = f"{workdir_data}/models/segment-anything/sam_vit_h_4b8939.pth"
+        sam_checkpoint = os.environ.get(
+            "REVISIT_SAM_CHECKPOINT",
+            f"{workdir_data}/models/segment-anything/sam_vit_h_4b8939.pth",
+        )
         list_all = [
             {"dataPath": dataPath1_r, "h5FullPathDINO": f"{workdir}/{args.dataset}_r_dino_{width_DINO}.h5", "h5FullPathSAM": f"{workdir}/{args.dataset}_r_masks_{width_SAM}.h5"},
             {"dataPath": dataPath2_q, "h5FullPathDINO": f"{workdir}/{args.dataset}_q_dino_{width_DINO}.h5", "h5FullPathSAM": f"{workdir}/{args.dataset}_q_masks_{width_SAM}.h5"} ]
@@ -111,7 +118,7 @@ if __name__=="__main__":
         dino = func_vpr.loadDINO(cfg_dino, device="cuda")
         for iter_dict in list_all:
             dataPath = iter_dict["dataPath"]
-            ims = natsorted(os.listdir(f'{dataPath}'))
+            ims = natsorted(list_image_names(dataPath))
             ims = ims[ims_sidx:ims_eidx][::ims_step]
         
             h5FullPathDINO = iter_dict["h5FullPathDINO"]
@@ -129,7 +136,7 @@ if __name__=="__main__":
         SAM = func_vpr.loadSAM(sam_checkpoint,cfg_sam, device="cuda")
         for iter_dict in list_all:
             dataPath = iter_dict["dataPath"]
-            ims = natsorted(os.listdir(f'{dataPath}'))
+            ims = natsorted(list_image_names(dataPath))
             ims = ims[ims_sidx:ims_eidx][::ims_step]
 
             h5FullPathSAM = iter_dict["h5FullPathSAM"]
@@ -140,8 +147,6 @@ if __name__=="__main__":
             # print(f[keys[0]]['masks']['21']['segmentation'])
 
         print("\n \n SAM EXTRACTED DONE \n \n ")
-
-
 
 
 

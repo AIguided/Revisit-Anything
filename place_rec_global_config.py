@@ -1,11 +1,65 @@
 
+import os
+
+
 # See README for more details on how to set the paths/expt configs in this script.
 
 # Step 0: set the parent path of where all datasets lie
-workdir_data = '/home/kartikgarg/workdir'
+workdir_data = os.environ.get('REVISIT_WORKDIR', '/home/kartikgarg/workdir')
+IMAGE_EXTENSIONS = {'.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp'}
+
+
+def list_image_names(directory):
+    """Return image files only so custom folders may contain unrelated files."""
+    return [
+        name
+        for name in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, name))
+        and os.path.splitext(name)[1].lower() in IMAGE_EXTENSIONS
+    ]
+
+
+def resolve_dataset_paths(dataset, dataset_config):
+    """Resolve standard datasets and CLI-selected custom image directories."""
+    dataset_root = os.path.join(workdir_data, dataset)
+    output_dir = os.path.join(dataset_root, 'out')
+    reference_dir = os.path.join(dataset_root, dataset_config['data_subpath1_r'])
+    query_dir = os.path.join(dataset_root, dataset_config['data_subpath2_q'])
+
+    if dataset == 'custom':
+        dataset_root = os.environ.get('REVISIT_CUSTOM_DATASET_DIR', dataset_root)
+        output_dir = os.environ.get(
+            'REVISIT_CUSTOM_OUTPUT_DIR', os.path.join(dataset_root, 'out')
+        )
+        reference_dir = os.environ.get(
+            'REVISIT_CUSTOM_REFERENCE_DIR',
+            os.path.join(dataset_root, dataset_config['data_subpath1_r']),
+        )
+        query_dir = os.environ.get(
+            'REVISIT_CUSTOM_QUERY_DIR',
+            os.path.join(dataset_root, dataset_config['data_subpath2_q']),
+        )
+
+    return (
+        os.path.abspath(dataset_root),
+        os.path.abspath(output_dir),
+        os.path.join(os.path.abspath(reference_dir), ''),
+        os.path.join(os.path.abspath(query_dir), ''),
+    )
 
 # Step 1: Set Dataset specific configurations
 datasets = {
+    "custom": {
+        "masks_h5_filename_r": "custom_r_masks_320.h5",
+        "masks_h5_filename_q": "custom_q_masks_320.h5",
+        "dino_h5_filename_r": "custom_r_dino_640.h5",
+        "dino_h5_filename_q": "custom_q_dino_640.h5",
+        "data_subpath1_r": "ref",
+        "data_subpath2_q": "query",
+        "cfg": {'rmin': 0, 'desired_width': 640, 'desired_height': 480},
+        "map_vlad_cluster": "17places",
+        "domain_vlad_cluster": "indoor",
+    },
     "baidu": {
         "masks_h5_filename_r": "baidu_r_masks_320.h5",
         "masks_h5_filename_q": "baidu_q_masks_320.h5",

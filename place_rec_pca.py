@@ -11,7 +11,13 @@ import sys
 
 
 import argparse
-from place_rec_global_config import datasets, experiments, workdir_data
+from place_rec_global_config import (
+	datasets,
+	experiments,
+	list_image_names,
+	resolve_dataset_paths,
+	workdir_data,
+)
 
 
 import utm
@@ -265,7 +271,9 @@ if __name__=="__main__":
 
 	cfg = dataset_config['cfg']
 
-	workdir = f'{workdir_data}/{args.dataset}/out'
+	_, workdir, dataPath1_r, dataPath2_q = resolve_dataset_paths(
+		args.dataset, dataset_config
+	)
 	os.makedirs(workdir, exist_ok=True)
 	save_path_results = f"{workdir}/results/"
 
@@ -292,18 +300,15 @@ if __name__=="__main__":
 	vlad.fit(None)
 
 	#Load Descriptors
-	dataPath1_r = f"{workdir_data}/{args.dataset}/{dataset_config['data_subpath1_r']}/"
-	dataPath2_q = f"{workdir_data}/{args.dataset}/{dataset_config['data_subpath2_q']}/"
-
 	dino_r_path = f"{workdir}/{dataset_config['dino_h5_filename_r']}"
 	dino_q_path = f"{workdir}/{dataset_config['dino_h5_filename_q']}"
 	dino1_h5_r = h5py.File(dino_r_path, 'r')
 	dino2_h5_q = h5py.File(dino_q_path, 'r')
 
 	ims_sidx, ims_eidx, ims_step = 0, None, 1
-	ims1_r = natsorted(os.listdir(f'{dataPath1_r}'))
+	ims1_r = natsorted(list_image_names(dataPath1_r))
 	ims1_r = ims1_r[ims_sidx:ims_eidx][::ims_step]
-	ims2_q = natsorted(os.listdir(f'{dataPath2_q}'))
+	ims2_q = natsorted(list_image_names(dataPath2_q))
 	ims2_q = ims2_q[ims_sidx:ims_eidx][::ims_step]
 
 
@@ -423,5 +428,3 @@ if __name__=="__main__":
 			print("DONE: PCA for reference images (50k randomly sampled segments) and saving to pickle file")
 			print(dataset_config, experiment_config)
 			print(f"vocab-vlad: {args.vocab_vlad}")
-
-

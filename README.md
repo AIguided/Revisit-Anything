@@ -120,6 +120,135 @@ For full pipeline, you need to run first 3 scripts below for pre-processing (1. 
     ```
     If you want to save the descriptors (for offline recall calculation later on), you can set `save_results` to `True` and results will automatically saved as `experiment_name_date_time` inside `{workdir}/results/global/`.
 
+### Environment troubleshooting
+
+The vector-database launcher requires the SegVLAD dependencies (`cv2`, `h5py`, `matplotlib`, `natsort`, `scipy`, `scikit-learn`, `utm`, and related packages). If it reports missing modules, create and activate the supplied environment before running it:
+
+```
+conda env create -n segvlad -f segvlad.yaml
+conda activate segvlad
+pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 \
+    --extra-index-url https://download.pytorch.org/whl/cu113
+$CONDA_PREFIX/bin/python -m pip install opencv-python einops fast-pytorch-kmeans h5py matplotlib natsort networkx pandas psutil scipy scikit-learn timm tqdm transformers tyro utm
+$CONDA_PREFIX/bin/python -m pip install -e ./sam
+```
+
+Verify the installation with a single-line Python command:
+
+```
+$CONDA_PREFIX/bin/python -c 'import cv2, einops, faiss, fast_pytorch_kmeans, h5py, matplotlib, natsort, networkx, pandas, PIL, psutil, scipy, sklearn, timm, torch, tqdm, transformers, tyro, utm; print("OK")'
+```
+
+If Bash shows a continuation prompt (`>`), it is waiting for the heredoc terminator; enter `PY` at column one (without leading spaces) or press `Ctrl-C`. The setup launcher below avoids this manual check.
+
+The launcher automatically uses the active Conda prefix (even when a nested virtualenv shadows the `python` command) and detects an installed `segvlad` environment when one is available. You can also select a Python executable explicitly with `--python /path/to/segvlad/bin/python`.
+
+To perform environment setup, dependency installation, SAM installation, and database execution in one command, use:
+
+```
+./setup_run_vector_db.sh ./dataset/17places_full/17places --repeats 10
+```
+
+The bootstrap launcher creates `segvlad` if needed, installs missing packages, verifies imports, and then delegates to `run_vector_db.sh`. For custom image folders, pass the same `--dataset custom`, `--source-dir`, `--query-dir`, and `--preprocess` options documented below.
+
+## Persistent vector database and query benchmark
+
+For `17places_full`, the precomputed SAM masks, DINO descriptors, and PCA model can be used to create a reusable FAISS database while running the normal evaluation:
+
+```
+REVISIT_WORKDIR=/path/to/workdir_data python place_rec_main.py \
+    --dataset 17places \
+    --experiment exp0_global_SegLoc_VLAD_PCA_o3 \
+    --vocab-vlad domain \
+    --save-results \
+    --save-vector-db \
+    --benchmark-vector-db
+```
+
+Alternatively, use the terminal launcher. With no path it prompts for the source directory:
+
+```
+./run_vector_db.sh
+```
+
+The directory can also be supplied directly:
+
+```
+./run_vector_db.sh /path/to/workdir_data/17places --repeats 10
+```
+
+For the extracted archive layout, the source directory is normally `.../17places_full/17places`. The launcher detects the dataset and selects the available VLAD/PCA vocabulary automatically; pass `--vocab domain` or `--vocab map` to force one.
+
+### Custom image sets
+
+Place custom images in separate reference and query folders. The folders may contain any supported image files (`jpg`, `jpeg`, `png`, `bmp`, `tif`, `tiff`, or `webp`):
+
+```
+/path/to/my_dataset/
+├── ref/       # database/reference images
+└── query/     # images to search
+```
+
+Create the environment, generate missing SAM/DINO/PCA artifacts, build the FAISS database, and benchmark it in one command:
+
+```
+./setup_run_vector_db.sh \
+    --dataset custom \
+    --source-dir /path/to/my_dataset/ref \
+    --query-dir /path/to/my_dataset/query \
+    --output-dir /path/to/my_dataset/out \
+    --sam-checkpoint /path/to/sam_vit_h_4b8939.pth \
+    --preprocess \
+    --repeats 10
+```
+
+If the four H5 files and PCA model already exist, skip preprocessing:
+
+```
+./setup_run_vector_db.sh \
+    --dataset custom \
+    --source-dir /path/to/my_dataset/ref \
+    --query-dir /path/to/my_dataset/query \
+    --output-dir /path/to/my_dataset/out \
+    --no-preprocess
+```
+
+The custom run writes `custom_r_masks_320.h5`, `custom_q_masks_320.h5`, DINO descriptors, and PCA output under the selected output directory. Its vector database is saved under `<output-dir>/vector_db/` with the name `custom_exp0_global_SegLoc_VLAD_PCA_o3_<domain|map>`:
+
+- `.faiss`: exact FAISS `IndexFlatL2` segment index.
+- `.metadata.npz`: segment-to-reference-image mapping and source image paths.
+- `.queries.npz`: normalized query vectors, per-image offsets, and query paths.
+- `.benchmark.json`: per-image mean, p50, p95, and p99 lookup latency plus image and segment QPS.
+
+Custom datasets do not need ground-truth labels for database creation or performance benchmarking.
+
+The benchmark measures FAISS lookup of all segment vectors belonging to one image. Therefore, `image_queries_per_second` is lookup-only: it excludes image loading, SAM/DINO extraction, VLAD/PCA encoding, index construction, disk writes, and recall evaluation. Measure the complete command with the system timer:
+
+```
+/usr/bin/time -f '\nWhole pipeline wall time: %E\nCPU: %P\nMax RSS: %M KB' \
+    ./setup_run_vector_db.sh ./dataset/17places_full/17places \
+    --no-preprocess --repeats 10
+```
+
+Use `run_vector_db.sh` instead of `setup_run_vector_db.sh` when you want to exclude environment/package setup. Change the output location and benchmark settings with `--vector-db-dir`, `--benchmark-top-k`, `--benchmark-warmup`, and `--benchmark-repeats`.
+
+### Accuracy and recall
+
+For `17places`, accuracy is reported in the terminal at the end of the run. The line `Max Seg Logs: [...]` contains recall@1 through recall@5; for example, `[0.95, 0.97, ...]` means 95% recall@1 and 97% recall@2. The `POSITIVES/TOTAL` line shows the number of successful queries out of the total.
+
+The raw matches and distances are also saved under `<output-dir>/results/global/<run>/` in the `*_matches_sims_*.pkl` file. The `.benchmark.json` file contains lookup speed only, not accuracy. Custom datasets currently have no recall score unless ground-truth correspondences are added.
+
+To benchmark the saved database again without running feature generation or recall evaluation:
+
+```
+python benchmark_vector_db.py \
+    --db-dir /path/to/workdir_data/17places/out/vector_db \
+    --name 17places_exp0_global_SegLoc_VLAD_PCA_o3_domain \
+    --top-k 200 \
+    --warmup 1 \
+    --repeats 10
+```
+
 Additionally:
 - The above scripts extract results for `SegVLAD-PreT` or pretrained case. If you want to run `SegVLAD-FineT` or finetuned experiments, just append the above scripts with `_finetuned` at the end, with below exception:
     - For step 1, you need to run `place_rec_DINO_finetuned.py` instead of `place_rec_SAM_DINO.py` and don't need to specify `method` argument. As you had already extracted SAM before, you just need finetuned DINO extraction here, so you can run:

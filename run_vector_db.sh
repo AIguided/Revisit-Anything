@@ -19,6 +19,9 @@ result_csv=""
 metrics_csv=""
 conda_prefix="${SEGVLAD_CONDA_PREFIX:-${CONDA_PREFIX:-}}"
 python_selection_explicit="false"
+if [[ -n "${SEGVLAD_CONDA_PREFIX:-}" ]]; then
+    python_selection_explicit="true"
+fi
 if [[ -n "${PYTHON_BIN:-}" ]]; then
     python_bin="$PYTHON_BIN"
     python_selection_explicit="true"
@@ -64,6 +67,7 @@ Examples:
   ./run_vector_db.sh /data/17places
   ./run_vector_db.sh --source-dir /data/my_refs --target-dir /data/my_queries --preprocess
   ./run_vector_db.sh --dataset custom --source-dir /data/set/ref --target-dir /data/set/query --ground-truth-csv /data/set/ground_truth.csv
+  ./run_vector_db.sh --conda-prefix /opt/conda/envs/segvlad --dataset custom --source-dir /data/set/ref --target-dir /data/set/query
 EOF
 }
 
@@ -187,7 +191,7 @@ if [[ -n "$ground_truth_csv" ]]; then
     ground_truth_csv="$(cd -- "$(dirname -- "$ground_truth_csv")" && pwd -P)/$(basename -- "$ground_truth_csv")"
 fi
 
-command -v "$python_bin" >/dev/null 2>&1 || fail "Python executable not found: $python_bin"
+[[ -x "$python_bin" ]] || fail "Python executable not found: $python_bin"
 
 required_python_modules=(
     cv2

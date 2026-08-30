@@ -143,6 +143,18 @@ If Bash shows a continuation prompt (`>`), it is waiting for the heredoc termina
 
 The launcher automatically uses the active Conda prefix (even when a nested virtualenv shadows the `python` command) and detects an installed `segvlad` environment when one is available. You can also select a Python executable explicitly with `--python /path/to/segvlad/bin/python`.
 
+To select a Conda environment by its prefix path without activating it, pass `--conda-prefix` (or `--prefix`) to either launcher:
+
+```
+./setup_run_vector_db.sh \
+    --conda-prefix /opt/conda/envs/segvlad \
+    --dataset custom \
+    --source-dir /data/reference \
+    --target-dir /data/query \
+    --ground-truth-csv /data/ground_truth.csv \
+    --preprocess
+```
+
 To perform environment setup, dependency installation, SAM installation, and database execution in one command, use:
 
 ```
